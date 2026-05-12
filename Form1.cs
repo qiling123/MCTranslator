@@ -588,12 +588,12 @@ namespace MCTranslator
         // ============= 资源包/光影分析 =============
         private string? ExtractAndAnalyze(string filePath)
         {
-            CurrentSession.SourceDict.Clear();
-            // 【断点续翻关键】去掉了 CurrentSession.TargetDict.Clear();
-            // 这样切换文件后，已翻译的内容不会丢失
+            CurrentSession.Clear(); // 完整重置会话状态
             string? localPackType = null;
-            CurrentSession.TempDir = Path.Combine(Path.GetTempPath(), "MCLocalize_" + Guid.NewGuid());
-            ZipFile.ExtractToDirectory(filePath, CurrentSession.TempDir);
+            string tempDir = Path.Combine(Path.GetTempPath(), "MCLocalize_" + Guid.NewGuid());
+            ZipFile.ExtractToDirectory(filePath, tempDir);
+            CurrentSession.TempDir = tempDir;
+            CurrentSession.FilePathOrFolder = filePath;
 
             string langDir = Path.Combine(CurrentSession.TempDir, "assets", "minecraft", "lang");
             if (Directory.Exists(langDir))
@@ -634,9 +634,16 @@ namespace MCTranslator
                 }
             }
 
-            if (CurrentSession.SourceDict.Count == 0) { MessageBox.Show("未找到英文文本。"); return null; }
+            if (CurrentSession.SourceDict.Count == 0)
+            {
+                MessageBox.Show("未找到英文语言文件");
+                return null;
+            }
+
+            CurrentSession.PackType = localPackType; // 关键：设置包类型
             var sb = new StringBuilder();
-            foreach (var kv in CurrentSession.SourceDict) sb.AppendLine($"{kv.Key} = {Truncate(kv.Value, 70)}");
+            foreach (var kv in CurrentSession.SourceDict)
+                sb.AppendLine($"{kv.Key} = {Truncate(kv.Value, 70)}");
             CurrentSource.Text = sb.ToString();
             CurrentTarget.Text = "";
             return localPackType;
@@ -644,12 +651,13 @@ namespace MCTranslator
         // ============= 整合包分析 =============
         private void ExtractAndAnalyzeModpack(string folderPath)
         {
-            CurrentSession.SourceDict.Clear();
-            CurrentSession.ModpackModIds.Clear();
+            CurrentSession.Clear(); // 完整重置会话状态
+            CurrentSession.PackType = "modpack";
+            CurrentSession.FilePathOrFolder = folderPath;
 
             var diff = ModpackAnalyzer.ScanWithDifferential(folderPath);
 
-            // 1. 把社区已翻译的直接存入 CurrentSession.TargetDict（不再进入待翻译队列）
+            // 1. 把社区已汉化的条目直接放入 TargetDict
             foreach (var kv in diff.AlreadyTranslated)
             {
                 CurrentSession.TargetDict[kv.Key] = CFPAHelper.CachedTranslations.ContainsKey(kv.Key)
