@@ -628,12 +628,10 @@ namespace MCTranslator
 
                     txtTarget.Text = $"翻译完成！共处理 {texts.Count} 条文本\r\n\r\n" + 
                         string.Join("\r\n", currentEntries.Select(kv => $"{kv.Key} -> {kv.Value}"));
-                    MessageBox.Show($"翻译完成！共处理 {texts.Count} 条文本", "翻译完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
-                    txtTarget.Text = $"翻译过程发生错误: {ex.Message}";
-                    MessageBox.Show($"翻译失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    txtTarget.Text = $"翻译出错: {ex.Message}";
                 }
                 finally
                 {
@@ -649,12 +647,39 @@ namespace MCTranslator
                     return;
                 }
 
-                using FolderBrowserDialog fbd = new() { Description = "选择资源包输出文件夹" };
-                if (fbd.ShowDialog() == DialogResult.OK)
+                using SaveFileDialog sfd = new()
                 {
-                    string packFolder = Path.Combine(fbd.SelectedPath, $"{currentModId}_zh_cn");
-                    CreateResourcePack(packFolder, currentModId, currentEntries);
-                    MessageBox.Show($"资源包已保存到 {packFolder}");
+                    Filter = "资源包 (*.zip)|*.zip",
+                    Title = "保存汉化资源包",
+                    FileName = $"{currentModId}_汉化资源包.zip"
+                };
+
+                if (sfd.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        using (var fs = new FileStream(sfd.FileName, FileMode.Create))
+                        using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
+                        {
+                            string langContent = string.Join("\n", currentEntries.Select(kv => $"{kv.Key}={kv.Value}"));
+                            var entry = zip.CreateEntry($"assets/{currentModId}/lang/zh_cn.lang");
+                            using (var writer = new StreamWriter(entry.Open(), Encoding.UTF8))
+                            {
+                                writer.Write(langContent);
+                            }
+
+                            var packEntry = zip.CreateEntry("pack.mcmeta");
+                            using (var writer = new StreamWriter(packEntry.Open(), Encoding.UTF8))
+                            {
+                                writer.Write("{\"pack\":{\"pack_format\":10,\"description\":\"汉化资源包 for " + currentModId + "\"}}");
+                            }
+                        }
+                        MessageBox.Show($"资源包已保存到:\n{sfd.FileName}", "保存成功");
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"保存失败: {ex.Message}", "错误");
+                    }
                 }
             };
         }
@@ -662,91 +687,60 @@ namespace MCTranslator
         private string GuessModIdFromJar(string jarPath)
         {
             string fileName = Path.GetFileNameWithoutExtension(jarPath);
-            
-            int versionIndex = fileName.IndexOf('-');
-            if (versionIndex > 0)
+            // 尝试从文件名中提取mod id，通常格式为 modname-version
+            int dashIndex = fileName.LastIndexOf('-');
+            if (dashIndex > 0)
             {
-                return fileName.Substring(0, versionIndex).ToLowerInvariant();
-            }
-            
-            versionIndex = fileName.IndexOf('_');
-            if (versionIndex > 0)
-            {
-                return fileName.Substring(0, versionIndex).ToLowerInvariant();
-            }
-            
-            for (int i = 0; i < fileName.Length; i++)
-            {
-                if (char.IsDigit(fileName[i]))
+                string potentialId = fileName.Substring(0, dashIndex).ToLower();
+                // 清理可能的后缀如 "-forge", "-fabric"
+                foreach (var suffix in new[] { "-forge", "-fabric", "-neoforge" })
                 {
-                    return fileName.Substring(0, i).TrimEnd('-', '_').ToLowerInvariant();
+                    if (potentialId.EndsWith(suffix))
+                        potentialId = potentialId.Substring(0, potentialId.Length - suffix.Length);
                 }
+                return potentialId;
             }
-            
-            return fileName.ToLowerInvariant();
-        }
-
-        private void CreateResourcePack(string packFolder, string modId, Dictionary<string, string> entries)
-        {
-            // 创建资源包目录结构
-            string assetsFolder = Path.Combine(packFolder, "assets", modId, "lang");
-            Directory.CreateDirectory(assetsFolder);
-
-            // 创建 pack.mcmeta
-            string mcmetaContent = @"{
-  ""pack"": {
-    ""pack_format"": 15,
-    ""description"": ""汉化资源包 - " + modId + @""
-+ @"
-  }
-}";
-            File.WriteAllText(Path.Combine(packFolder, "pack.mcmeta"), mcmetaContent, Encoding.UTF8);
-
-            // 创建 pack.png（简单的占位）
-            using (var bmp = new System.Drawing.Bitmap(64, 64))
-            using (var g = System.Drawing.Graphics.FromImage(bmp))
-            {
-                g.Clear(System.Drawing.Color.LightBlue);
-                bmp.Save(Path.Combine(packFolder, "pack.png"));
-            }
-
-            // 创建语言文件
-            string langContent = JsonConvert.SerializeObject(entries, Formatting.Indented);
-            File.WriteAllText(Path.Combine(assetsFolder, "zh_cn.json"), langContent, Encoding.UTF8);
+            return fileName.ToLower();
         }
 
         private Dictionary<string, string> ExtractLangFromJar(string jarPath)
         {
-            var entries = new Dictionary<string, string>();
-            string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            var result = new Dictionary<string, string>();
             try
             {
-                ZipFile.ExtractToDirectory(jarPath, tempDir);
-                foreach (var file in Directory.GetFiles(tempDir, "*.json", SearchOption.AllDirectories))
+                using (var fs = new FileStream(jarPath, FileMode.Open, FileAccess.Read))
+                using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
                 {
-                    string relativePath = Path.GetRelativePath(tempDir, file);
-                    if (relativePath.IndexOf("lang", StringComparison.OrdinalIgnoreCase) >= 0 && 
-                        (relativePath.IndexOf("en_us", StringComparison.OrdinalIgnoreCase) >= 0))
+                    foreach (var entry in zip.Entries)
                     {
-                        try
+                        // 查找语言文件
+                        if (entry.FullName.StartsWith("assets/") && entry.FullName.EndsWith("/lang/en_us.lang"))
                         {
-                            string content = File.ReadAllText(file, Encoding.UTF8);
-                            var json = JsonConvert.DeserializeObject<Dictionary<string, string>>(content);
-                            if (json != null)
+                            using (var reader = new StreamReader(entry.Open(), Encoding.UTF8))
                             {
-                                foreach (var kv in json)
+                                string? line;
+                                while ((line = reader.ReadLine()) != null)
                                 {
-                                    if (!entries.ContainsKey(kv.Key))
-                                        entries[kv.Key] = kv.Value;
+                                    string trimmedLine = line!.Trim();
+                                    if (string.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith("#"))
+                                        continue;
+                                    
+                                    int equalsIndex = trimmedLine.IndexOf('=');
+                                    if (equalsIndex > 0)
+                                    {
+                                        string key = trimmedLine.Substring(0, equalsIndex).Trim();
+                                        string value = trimmedLine.Substring(equalsIndex + 1).Trim();
+                                        if (!result.ContainsKey(key))
+                                            result[key] = value;
+                                    }
                                 }
                             }
                         }
-                        catch { }
                     }
                 }
             }
-            finally { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
-            return entries;
+            catch { }
+            return result;
         }
 
         private void CreateTabTools(TabControl tab)
@@ -868,29 +862,6 @@ namespace MCTranslator
                 txtDeepSeekModel = new TextBox { Location = new Point(380, y - 3), Width = 140, Text = "deepseek-chat" };
                 pnlConfig.Controls.Add(txtDeepSeekModel);
                 pnlConfig.Controls.Add(new Label { Text = "已内置MC术语约束", Location = new Point(540, y), AutoSize = true, ForeColor = Color.Blue });
-                // 翻译风格下拉框
-                cmbStyle = new ComboBox
-                {
-                    Location = new Point(540, y + 30),
-                    Width = 120,
-                    DropDownStyle = ComboBoxStyle.DropDownList
-                };
-                cmbStyle.Items.AddRange(new[] { "标准", "科技", "魔法" });
-                cmbStyle.SelectedIndex = 0;
-                pnlConfig.Controls.Add(cmbStyle);
-                
-                // 并发数调节
-                pnlConfig.Controls.Add(new Label { Text = "并发数:", Location = new Point(680, y + 30), AutoSize = true });
-                var nudConcurrency = new NumericUpDown
-                {
-                    Location = new Point(740, y + 28),
-                    Width = 50,
-                    Minimum = 1,
-                    Maximum = 10,
-                    Value = _maxConcurrency
-                };
-                nudConcurrency.ValueChanged += (s, e) => _maxConcurrency = (int)nudConcurrency.Value;
-                pnlConfig.Controls.Add(nudConcurrency);
             }
         }
 
