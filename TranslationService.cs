@@ -179,7 +179,11 @@ public class DeepSeekService : ITranslationService, IDisposable
             if (result == null) throw new Exception("API未返回结果");
 
             if (result["error"] != null)
-                throw new Exception($"API错误: {result["error"]["message"]?.ToString() ?? "未知错误"}");
+            {
+                var errorObj = result["error"];
+                var message = errorObj?["message"]?.ToString() ?? "未知错误";
+                throw new Exception($"API错误: {message}");
+            }
 
             // Safely extract the model reply from choices
             string reply;
