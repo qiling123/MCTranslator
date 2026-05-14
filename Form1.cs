@@ -878,6 +878,7 @@ namespace MCTranslator
                 cmbStyle.Items.AddRange(new[] { "标准", "科技", "魔法" });
                 cmbStyle.SelectedIndex = 0;
                 pnlConfig.Controls.Add(cmbStyle);
+                
                 // 并发数调节
                 pnlConfig.Controls.Add(new Label { Text = "并发数:", Location = new Point(680, y + 30), AutoSize = true });
                 var nudConcurrency = new NumericUpDown

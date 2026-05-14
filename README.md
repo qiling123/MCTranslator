@@ -31,8 +31,9 @@
 
 ## 📸 软件截图（可选）
 
-*（此处可放置主界面、翻译中、保存结果等截图）*
-
+![alt text](f0974ac6be8bf93c0dcba5e770e2f4a8.png)
+![alt text](8b7096ecd1ce2d6b331ce428dab650d0.png)
+![alt text](8b7096ecd1ce2d6b331ce428dab650d0-1.png)
 ---
 
 ## 🚀 使用教程
