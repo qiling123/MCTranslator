@@ -66,14 +66,15 @@ namespace MCTranslator
                 // 1. 尝试通过 GitHub API 下载
                 try
                 {
-                    using (var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+                    using (var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) })
                     {
                         client.DefaultRequestHeaders.Add("User-Agent", "MCTranslator");
                         // 如果有 Token 就加上，没有则跳过
-                        if (!string.IsNullOrEmpty(GITHUB_TOKEN))
+                        var tokenToUse = string.IsNullOrWhiteSpace(gitHubToken) ? GITHUB_TOKEN : gitHubToken;
+                        if (!string.IsNullOrWhiteSpace(tokenToUse))
                         {
                             client.DefaultRequestHeaders.Authorization =
-                                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", GITHUB_TOKEN);
+                                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", tokenToUse);
                         }
 
                         var response = await client.GetStringAsync(API_URL);
@@ -99,10 +100,32 @@ namespace MCTranslator
                         if (downloadUrl != null)
                         {
                             progress?.Report("正在下载 CFPA 汉化资源包...");
-                            var fileResponse = await client.GetAsync(downloadUrl);
-                            fileResponse.EnsureSuccessStatusCode();
-                            using (var fs = File.Create(zipFile))
-                                await fileResponse.Content.CopyToAsync(fs);
+                            using (var fileResponse = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead))
+                            {
+                                fileResponse.EnsureSuccessStatusCode();
+                                long totalBytes = fileResponse.Content.Headers.ContentLength ?? -1;
+                                using (var stream = await fileResponse.Content.ReadAsStreamAsync())
+                                using (var fs = File.Create(zipFile))
+                                {
+                                    byte[] buffer = new byte[81920];
+                                    long totalRead = 0;
+                                    int bytesRead;
+                                    while ((bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length))) > 0)
+                                    {
+                                        await fs.WriteAsync(buffer.AsMemory(0, bytesRead));
+                                        totalRead += bytesRead;
+                                        if (totalBytes > 0)
+                                        {
+                                            int percent = (int)(totalRead * 100 / totalBytes);
+                                            progress?.Report($"下载 CFPA 资源包: {percent}% ({totalRead}/{totalBytes} 字节)");
+                                        }
+                                        else
+                                        {
+                                            progress?.Report($"下载 CFPA 资源包: {totalRead} 字节 已下载...");
+                                        }
+                                    }
+                                }
+                            }
 
                             File.WriteAllText(lastUpdateFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                             downloadSuccess = true;
@@ -112,6 +135,7 @@ namespace MCTranslator
                 catch (Exception ex)
                 {
                     progress?.Report($"GitHub API 下载失败：{ex.Message}");
+                    MCTranslator.ErrorLogger.Log($"CFPA GitHub 下载失败: {ex}");
                 }
 
                 // 2. 如果 API 方式失败，尝试备用地址
@@ -119,14 +143,37 @@ namespace MCTranslator
                 {
                     try
                     {
-                        using (var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+                        using (var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) })
                         {
                             client.DefaultRequestHeaders.Add("User-Agent", "MCTranslator");
                             progress?.Report("尝试备用下载地址...");
-                            var response = await client.GetAsync(CFPA_DOWNLOAD_URL);
-                            response.EnsureSuccessStatusCode();
-                            using (var fs = File.Create(zipFile))
-                                await response.Content.CopyToAsync(fs);
+                            using (var response = await client.GetAsync(CFPA_DOWNLOAD_URL, HttpCompletionOption.ResponseHeadersRead))
+                            {
+                                response.EnsureSuccessStatusCode();
+                                long totalBytes = response.Content.Headers.ContentLength ?? -1;
+                                using (var stream = await response.Content.ReadAsStreamAsync())
+                                using (var fs = File.Create(zipFile))
+                                {
+                                    byte[] buffer = new byte[81920];
+                                    long totalRead = 0;
+                                    int bytesRead;
+                                    while ((bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length))) > 0)
+                                    {
+                                        await fs.WriteAsync(buffer.AsMemory(0, bytesRead));
+                                        totalRead += bytesRead;
+                                        if (totalBytes > 0)
+                                        {
+                                            int percent = (int)(totalRead * 100 / totalBytes);
+                                            progress?.Report($"下载 CFPA 资源包(备用): {percent}% ({totalRead}/{totalBytes} 字节)");
+                                        }
+                                        else
+                                        {
+                                            progress?.Report($"下载 CFPA 资源包(备用): {totalRead} 字节 已下载...");
+                                        }
+                                    }
+                                }
+                            }
+
                             File.WriteAllText(lastUpdateFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                             downloadSuccess = true;
                         }
@@ -134,12 +181,14 @@ namespace MCTranslator
                     catch (Exception ex)
                     {
                         progress?.Report($"备用下载地址失败：{ex.Message}");
+                        MCTranslator.ErrorLogger.Log($"CFPA 备用下载失败: {ex}");
                     }
                 }
 
                 if (!downloadSuccess)
                 {
                     progress?.Report("所有下载地址均失败，将仅使用 AI 翻译。");
+                    MCTranslator.ErrorLogger.Log($"CFPA 下载失败，所有地址均不可用");
                     if (File.Exists(zipFile))
                         progress?.Report("回退到旧的本地缓存。");
                 }
@@ -149,14 +198,17 @@ namespace MCTranslator
             if (File.Exists(zipFile))
             {
                 progress?.Report("正在解析 CFPA 翻译数据...");
-                ParseCFPAZip(zipFile);
+                int before = CachedTranslations.Count;
+                ParseCFPAZip(zipFile, progress);
+                int after = CachedTranslations.Count;
+                progress?.Report($"解析完成，共 {after} 条，新增 {after - before} 条。");
             }
 
             IsLoaded = true;
             return CachedTranslations;
         }
 
-        private static void ParseCFPAZip(string zipFile)
+        private static void ParseCFPAZip(string zipFile, IProgress<string>? progress = null)
         {
             string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
             try
@@ -164,12 +216,19 @@ namespace MCTranslator
                 ZipFile.ExtractToDirectory(zipFile, tempDir);
                 string assetsPath = Path.Combine(tempDir, "assets");
                 if (!Directory.Exists(assetsPath)) return;
-
-                foreach (string modDir in Directory.GetDirectories(assetsPath))
+                var modDirs = Directory.GetDirectories(assetsPath);
+                int totalMods = modDirs.Length;
+                int processed = 0;
+                foreach (string modDir in modDirs)
                 {
+                    processed++;
                     string modId = Path.GetFileName(modDir);
                     string zhJson = Path.Combine(modDir, "lang", "zh_cn.json");
-                    if (!File.Exists(zhJson)) continue;
+                    if (!File.Exists(zhJson))
+                    {
+                        progress?.Report($"解析模块 {modId} ({processed}/{totalMods})：无 zh_cn.json，跳过...");
+                        continue;
+                    }
 
                     try
                     {
@@ -180,8 +239,12 @@ namespace MCTranslator
                             if (!CachedTranslations.ContainsKey(key))
                                 CachedTranslations[key] = prop.Value!.ToString();
                         }
+                        progress?.Report($"解析模块 {modId} ({processed}/{totalMods})：已加载 {json.Count} 条");
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        progress?.Report($"解析模块 {modId} 失败: {ex.Message}");
+                    }
                 }
             }
             finally

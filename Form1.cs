@@ -2,7 +2,9 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -27,7 +29,10 @@ namespace MCTranslator
         // ========== 界面控件 ==========
         private TabControl tabMain = null!;
         private ComboBox cmbEngine = null!;
+        private ComboBox? cmbStyle = null;
         private Panel pnlConfig = null!;
+        private int _maxConcurrency = 3; // 默认并发数
+        private bool _darkMode = false;
         private TextBox? txtBaiduAppId;
         private TextBox? txtBaiduSecret;
         private TextBox? txtDeepSeekKey;
@@ -68,6 +73,7 @@ namespace MCTranslator
             CreateTabHome(tabMain);
             CreateTabResource(tabMain);
             CreateTabModpack(tabMain);
+            CreateTabModChinese(tabMain); // 新增mod汉化页签
             CreateTabTools(tabMain);
 
             // 页签切换事件
@@ -94,7 +100,10 @@ namespace MCTranslator
                         lblPathResource.Text = file;
                         ExtractAndAnalyze(file);
                     }
-                    else MessageBox.Show("仅支持拖拽 .zip 文件");
+                    else
+                    {
+                        MessageBox.Show("仅支持拖拽 .zip 文件");
+                    }
                 }
             };
 
@@ -117,6 +126,25 @@ namespace MCTranslator
                 Width = 160,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
+            // 暗色模式切换按钮
+            var btnThemeToggle = new RoundedButton
+            {
+                Text = "暗色模式: 关",
+                Location = new Point(280, 20),
+                Size = new Size(100, 28),
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("微软雅黑", 9F, FontStyle.Bold)
+            };
+            btnThemeToggle.Click += (s, e) =>
+            {
+                _darkMode = !_darkMode;
+                btnThemeToggle.Text = _darkMode ? "暗色模式: 开" : "暗色模式: 关";
+                ApplyTheme(_darkMode);
+                // 切换主题后刷新界面以确保控件立即更新
+                Application.DoEvents();
+            };
+            page.Controls.Add(btnThemeToggle);
             cmbEngine.Items.AddRange(new[] { "百度翻译", "DeepSeek" });
             cmbEngine.SelectedIndex = 0;
             cmbEngine.SelectedIndexChanged += EngineChanged;
@@ -194,24 +222,22 @@ namespace MCTranslator
             page.Controls.Add(txtSourceResource);
 
             y += 160;
-            Button btnTranslate = new Button
+            RoundedButton btnTranslate = new RoundedButton
             {
                 Text = "开始翻译",
                 Location = new Point(20, y),
                 Size = new Size(100, 30),
-                FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(0, 120, 212),
                 ForeColor = Color.White,
                 Font = new Font("微软雅黑", 9F, FontStyle.Bold)
             };
             page.Controls.Add(btnTranslate);
 
-            Button btnSave = new Button
+            RoundedButton btnSave = new RoundedButton
             {
                 Text = "保存汉化包",
                 Location = new Point(130, y),
                 Size = new Size(100, 30),
-                FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(0, 120, 212),
                 ForeColor = Color.White,
                 Font = new Font("微软雅黑", 9F, FontStyle.Bold)
@@ -252,7 +278,7 @@ namespace MCTranslator
 
             btnSave.Click += async (s, e) =>
             {
-                if (CurrentSession.PackType == "modpack") { SaveModpackPack(); return; }
+                if (CurrentSession.PackType == "modpack") { await SaveModpackPackAsync(); return; }
                 if (string.IsNullOrEmpty(lblPathResource.Text) || !File.Exists(lblPathResource.Text))
                 { MessageBox.Show("请先选择一个资源/光影包"); return; }
                 string originalName = Path.GetFileNameWithoutExtension(lblPathResource.Text);
@@ -360,10 +386,12 @@ namespace MCTranslator
                 lblPathModpack.Text = fbd.SelectedPath;
                 if (_useCFPA)
                 {
-                    await CFPAHelper.LoadCFPATranslationsAsync(
-                        progress: null,                           // 或者 new Progress<string>(...)
-                            gitHubToken: txtGitHubToken?.Text?.Trim()
-                                                              );
+                    var progress = new Progress<string>(msg =>
+                    {
+                        txtSourceModpack.Text = msg;
+                        Application.DoEvents();
+                    });
+                    await CFPAHelper.LoadCFPATranslationsAsync(progress: progress, gitHubToken: txtGitHubToken?.Text?.Trim());
                 }
                 ExtractAndAnalyzeModpack(fbd.SelectedPath);
             };
@@ -375,7 +403,350 @@ namespace MCTranslator
                 await TranslateAll();
             };
 
-            btnSave.Click += (s, e) => SaveModpackPack();
+            btnSave.Click += async (s, e) => await SaveModpackPackAsync();
+        }
+
+        private void CreateTabModChinese(TabControl tab)
+        {
+            TabPage page = new TabPage("mod汉化") { BackColor = Color.White };
+            tab.TabPages.Add(page);
+
+            int y = 20;
+            
+            RoundedButton btnSelectMod = new RoundedButton
+            {
+                Text = "选择模组文件(.jar)",
+                Location = new Point(20, y),
+                Size = new Size(150, 30),
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("微软雅黑", 9F, FontStyle.Bold)
+            };
+            page.Controls.Add(btnSelectMod);
+
+            Label lblModPath = new Label
+            {
+                Text = "未选择",
+                Location = new Point(180, y + 5),
+                AutoSize = true
+            };
+            page.Controls.Add(lblModPath);
+
+            Label lblStatus = new Label
+            {
+                Text = "",
+                Location = new Point(380, y + 5),
+                AutoSize = true,
+                ForeColor = Color.Green
+            };
+            page.Controls.Add(lblStatus);
+
+            y += 40;
+            
+            GroupBox groupFunction = new GroupBox
+            {
+                Text = "操作",
+                Location = new Point(20, y),
+                Size = new Size(790, 60)
+            };
+            page.Controls.Add(groupFunction);
+
+            RoundedButton btnScan = new RoundedButton
+            {
+                Text = "提取语言文件",
+                Location = new Point(20, 18),
+                Size = new Size(140, 30),
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("微软雅黑", 9F, FontStyle.Bold)
+            };
+            groupFunction.Controls.Add(btnScan);
+
+            RoundedButton btnTranslate = new RoundedButton
+            {
+                Text = "翻译",
+                Location = new Point(170, 18),
+                Size = new Size(100, 30),
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("微软雅黑", 9F, FontStyle.Bold)
+            };
+            groupFunction.Controls.Add(btnTranslate);
+
+            y += 70;
+
+            Label lblSource = new Label { Text = "提取结果（语言文件）:", Location = new Point(20, y), AutoSize = true, Font = new Font("微软雅黑", 9F, FontStyle.Bold) };
+            page.Controls.Add(lblSource);
+            y += 22;
+
+            TextBox txtSource = new TextBox
+            {
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                Location = new Point(20, y),
+                Size = new Size(790, 120),
+                ReadOnly = true
+            };
+            page.Controls.Add(txtSource);
+
+            y += 130;
+
+            Label lblTarget = new Label { Text = "翻译结果:", Location = new Point(20, y), AutoSize = true, Font = new Font("微软雅黑", 9F, FontStyle.Bold) };
+            page.Controls.Add(lblTarget);
+            y += 22;
+
+            TextBox txtTarget = new TextBox
+            {
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                Location = new Point(20, y),
+                Size = new Size(790, 120)
+            };
+            page.Controls.Add(txtTarget);
+
+            y += 130;
+
+            GroupBox groupOutput = new GroupBox
+            {
+                Text = "输出格式",
+                Location = new Point(20, y),
+                Size = new Size(790, 60)
+            };
+            page.Controls.Add(groupOutput);
+
+            RoundedButton btnSaveResourcePack = new RoundedButton
+            {
+                Text = "保存为资源包",
+                Location = new Point(20, 18),
+                Size = new Size(140, 30),
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("微软雅黑", 9F, FontStyle.Bold)
+            };
+            groupOutput.Controls.Add(btnSaveResourcePack);
+
+            Dictionary<string, string> currentEntries = new Dictionary<string, string>();
+            string currentModId = "";
+
+            btnSelectMod.Click += (s, e) =>
+            {
+                using OpenFileDialog ofd = new() 
+                { 
+                    Filter = "模组文件 (*.jar)|*.jar|所有文件 (*.*)|*.*",
+                    Title = "选择要汉化的模组文件"
+                };
+                if (ofd.ShowDialog() == DialogResult.OK)
+                {
+                    lblModPath.Text = ofd.FileName;
+                    currentModId = GuessModIdFromJar(ofd.FileName);
+                    txtSource.Text = "";
+                    txtTarget.Text = "";
+                    currentEntries.Clear();
+                    lblStatus.Text = "";
+                }
+            };
+
+            btnScan.Click += (s, e) =>
+            {
+                string modPath = lblModPath.Text;
+                if (string.IsNullOrEmpty(modPath) || !File.Exists(modPath))
+                {
+                    MessageBox.Show("请先选择一个模组文件(.jar)。");
+                    return;
+                }
+
+                currentEntries = ExtractLangFromJar(modPath);
+                
+                if (currentEntries.Count == 0)
+                {
+                    txtSource.Text = "未找到语言文件。该模组可能不包含标准语言文件。";
+                    lblStatus.Text = "检测结果：未发现语言文件";
+                    lblStatus.ForeColor = Color.Red;
+                }
+                else
+                {
+                    txtSource.Text = $"共提取到 {currentEntries.Count} 条翻译条目:\r\n\r\n" + string.Join("\r\n", currentEntries.Select(kv => $"{kv.Key}={kv.Value}"));
+                    lblStatus.Text = $"检测结果：发现 {currentEntries.Count} 条语言条目";
+                    lblStatus.ForeColor = Color.Green;
+                }
+                txtTarget.Text = "";
+            };
+
+            btnTranslate.Click += async (s, e) =>
+            {
+                if (currentEntries.Count == 0)
+                {
+                    MessageBox.Show("请先提取语言文件。");
+                    return;
+                }
+
+                btnTranslate.Enabled = false;
+                txtTarget.Text = "正在初始化翻译服务...";
+                Application.DoEvents();
+
+                try
+                {
+                    string? engine = cmbEngine.SelectedItem?.ToString();
+                    string style = cmbStyle?.SelectedItem?.ToString() ?? "标准";
+                    ITranslationService service = engine == "百度翻译"
+                        ? new BaiduService(txtBaiduAppId!.Text.Trim(), txtBaiduSecret!.Text.Trim())
+                        : new DeepSeekService(txtDeepSeekKey!.Text.Trim(), txtDeepSeekModel?.Text.Trim() ?? "deepseek-chat", style: style);
+
+                    var texts = currentEntries.Keys.ToList();
+                    var translated = new List<string>();
+                    int totalBatches = (int)Math.Ceiling((double)texts.Count / 20);
+                    
+                    txtTarget.Text = $"开始翻译，共 {texts.Count} 条，分为 {totalBatches} 批...\r\n";
+                    Application.DoEvents();
+
+                    for (int i = 0; i < texts.Count; i += 20)
+                    {
+                        int currentBatch = (i / 20) + 1;
+                        txtTarget.Text = $"正在翻译第 {currentBatch}/{totalBatches} 批... ({i + 1}-{Math.Min(i + 20, texts.Count)} 条)";
+                        Application.DoEvents();
+
+                        var batch = texts.Skip(i).Take(20).ToList();
+                        try 
+                        { 
+                            var results = await service.TranslateAsync(batch);
+                            translated.AddRange(results);
+                            txtTarget.Text += $"\r\n第 {currentBatch} 批翻译完成";
+                        }
+                        catch (Exception ex) 
+                        { 
+                            txtTarget.Text += $"\r\n第 {currentBatch} 批翻译失败: {ex.Message}";
+                            for (int k = 0; k < batch.Count; k++) 
+                                translated.Add(batch[k]); 
+                        }
+                        Application.DoEvents();
+                    }
+
+                    for (int i = 0; i < texts.Count; i++)
+                    {
+                        currentEntries[texts[i]] = i < translated.Count ? translated[i] : texts[i];
+                    }
+
+                    txtTarget.Text = $"翻译完成！共处理 {texts.Count} 条文本\r\n\r\n" + 
+                        string.Join("\r\n", currentEntries.Select(kv => $"{kv.Key} -> {kv.Value}"));
+                    MessageBox.Show($"翻译完成！共处理 {texts.Count} 条文本", "翻译完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    txtTarget.Text = $"翻译过程发生错误: {ex.Message}";
+                    MessageBox.Show($"翻译失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    btnTranslate.Enabled = true;
+                }
+            };
+
+            btnSaveResourcePack.Click += (s, e) =>
+            {
+                if (currentEntries.Count == 0)
+                {
+                    MessageBox.Show("请先提取并翻译语言文件。");
+                    return;
+                }
+
+                using FolderBrowserDialog fbd = new() { Description = "选择资源包输出文件夹" };
+                if (fbd.ShowDialog() == DialogResult.OK)
+                {
+                    string packFolder = Path.Combine(fbd.SelectedPath, $"{currentModId}_zh_cn");
+                    CreateResourcePack(packFolder, currentModId, currentEntries);
+                    MessageBox.Show($"资源包已保存到 {packFolder}");
+                }
+            };
+        }
+
+        private string GuessModIdFromJar(string jarPath)
+        {
+            string fileName = Path.GetFileNameWithoutExtension(jarPath);
+            
+            int versionIndex = fileName.IndexOf('-');
+            if (versionIndex > 0)
+            {
+                return fileName.Substring(0, versionIndex).ToLowerInvariant();
+            }
+            
+            versionIndex = fileName.IndexOf('_');
+            if (versionIndex > 0)
+            {
+                return fileName.Substring(0, versionIndex).ToLowerInvariant();
+            }
+            
+            for (int i = 0; i < fileName.Length; i++)
+            {
+                if (char.IsDigit(fileName[i]))
+                {
+                    return fileName.Substring(0, i).TrimEnd('-', '_').ToLowerInvariant();
+                }
+            }
+            
+            return fileName.ToLowerInvariant();
+        }
+
+        private void CreateResourcePack(string packFolder, string modId, Dictionary<string, string> entries)
+        {
+            // 创建资源包目录结构
+            string assetsFolder = Path.Combine(packFolder, "assets", modId, "lang");
+            Directory.CreateDirectory(assetsFolder);
+
+            // 创建 pack.mcmeta
+            string mcmetaContent = @"{
+  ""pack"": {
+    ""pack_format"": 15,
+    ""description"": ""汉化资源包 - " + modId + @""
++ @"
+  }
+}";
+            File.WriteAllText(Path.Combine(packFolder, "pack.mcmeta"), mcmetaContent, Encoding.UTF8);
+
+            // 创建 pack.png（简单的占位）
+            using (var bmp = new System.Drawing.Bitmap(64, 64))
+            using (var g = System.Drawing.Graphics.FromImage(bmp))
+            {
+                g.Clear(System.Drawing.Color.LightBlue);
+                bmp.Save(Path.Combine(packFolder, "pack.png"));
+            }
+
+            // 创建语言文件
+            string langContent = JsonConvert.SerializeObject(entries, Formatting.Indented);
+            File.WriteAllText(Path.Combine(assetsFolder, "zh_cn.json"), langContent, Encoding.UTF8);
+        }
+
+        private Dictionary<string, string> ExtractLangFromJar(string jarPath)
+        {
+            var entries = new Dictionary<string, string>();
+            string tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            try
+            {
+                ZipFile.ExtractToDirectory(jarPath, tempDir);
+                foreach (var file in Directory.GetFiles(tempDir, "*.json", SearchOption.AllDirectories))
+                {
+                    string relativePath = Path.GetRelativePath(tempDir, file);
+                    if (relativePath.IndexOf("lang", StringComparison.OrdinalIgnoreCase) >= 0 && 
+                        (relativePath.IndexOf("en_us", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        try
+                        {
+                            string content = File.ReadAllText(file, Encoding.UTF8);
+                            var json = JsonConvert.DeserializeObject<Dictionary<string, string>>(content);
+                            if (json != null)
+                            {
+                                foreach (var kv in json)
+                                {
+                                    if (!entries.ContainsKey(kv.Key))
+                                        entries[kv.Key] = kv.Value;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            finally { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+            return entries;
         }
 
         private void CreateTabTools(TabControl tab)
@@ -384,12 +755,11 @@ namespace MCTranslator
             tab.TabPages.Add(page);
 
             int y = 20;
-            Button btnFormatTools = new Button
+            RoundedButton btnFormatTools = new RoundedButton
             {
                 Text = "汉化小工具 (Lang转Json/补全)",
                 Location = new Point(20, y),
                 Size = new Size(220, 30),
-                FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(0, 120, 212),
                 ForeColor = Color.White,
                 Font = new Font("微软雅黑", 9F, FontStyle.Bold)
@@ -400,12 +770,11 @@ namespace MCTranslator
             };
             page.Controls.Add(btnFormatTools);
 
-            Button btnClearCache = new Button
+            RoundedButton btnClearCache = new RoundedButton
             {
                 Text = "清除 CFPA 缓存",
                 Location = new Point(250, y),
                 Size = new Size(130, 30),
-                FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(0, 120, 212),
                 ForeColor = Color.White,
                 Font = new Font("微软雅黑", 9F, FontStyle.Bold)
@@ -419,12 +788,11 @@ namespace MCTranslator
             page.Controls.Add(btnClearCache);
 
             y += 50;
-            Button btnHelp = new Button
+            RoundedButton btnHelp = new RoundedButton
             {
                 Text = "使用说明",
                 Location = new Point(20, y),
                 Size = new Size(100, 30),
-                FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(0, 120, 212),
                 ForeColor = Color.White,
                 Font = new Font("微软雅黑", 9F, FontStyle.Bold)
@@ -435,18 +803,45 @@ namespace MCTranslator
             };
             page.Controls.Add(btnHelp);
 
-            Button btnAbout = new Button
+            RoundedButton btnAbout = new RoundedButton
             {
                 Text = "关于 / 版权",
                 Location = new Point(130, y),
                 Size = new Size(100, 30),
-                FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(0, 120, 212),
                 ForeColor = Color.White,
                 Font = new Font("微软雅黑", 9F, FontStyle.Bold)
             };
             btnAbout.Click += (s, e) => ShowAbout();
             page.Controls.Add(btnAbout);
+            // 查看错误日志按钮
+            var btnViewLog = new RoundedButton
+            {
+                Text = "查看错误日志",
+                Location = new Point(240, y),
+                Size = new Size(120, 30),
+                BackColor = Color.FromArgb(0, 120, 212),
+                ForeColor = Color.White,
+                Font = new Font("微软雅黑", 9F, FontStyle.Bold)
+            };
+            btnViewLog.Click += (s, e) =>
+            {
+                try
+                {
+                    var path = MCTranslator.ErrorLogger.LogFilePath;
+                    if (!File.Exists(path))
+                    {
+                        MessageBox.Show("尚无错误日志。", "错误日志");
+                        return;
+                    }
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("notepad.exe", path) { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"无法打开错误日志: {ex.Message}", "错误");
+                }
+            };
+            page.Controls.Add(btnViewLog);
         }
 
         // EngineChanged 保持原有逻辑，但面板位置不变（因为现在 pnlConfig 仍然存在于主页面中）
@@ -473,6 +868,28 @@ namespace MCTranslator
                 txtDeepSeekModel = new TextBox { Location = new Point(380, y - 3), Width = 140, Text = "deepseek-chat" };
                 pnlConfig.Controls.Add(txtDeepSeekModel);
                 pnlConfig.Controls.Add(new Label { Text = "已内置MC术语约束", Location = new Point(540, y), AutoSize = true, ForeColor = Color.Blue });
+                // 翻译风格下拉框
+                cmbStyle = new ComboBox
+                {
+                    Location = new Point(540, y + 30),
+                    Width = 120,
+                    DropDownStyle = ComboBoxStyle.DropDownList
+                };
+                cmbStyle.Items.AddRange(new[] { "标准", "科技", "魔法" });
+                cmbStyle.SelectedIndex = 0;
+                pnlConfig.Controls.Add(cmbStyle);
+                // 并发数调节
+                pnlConfig.Controls.Add(new Label { Text = "并发数:", Location = new Point(680, y + 30), AutoSize = true });
+                var nudConcurrency = new NumericUpDown
+                {
+                    Location = new Point(740, y + 28),
+                    Width = 50,
+                    Minimum = 1,
+                    Maximum = 10,
+                    Value = _maxConcurrency
+                };
+                nudConcurrency.ValueChanged += (s, e) => _maxConcurrency = (int)nudConcurrency.Value;
+                pnlConfig.Controls.Add(nudConcurrency);
             }
         }
 
@@ -496,15 +913,56 @@ namespace MCTranslator
 原创作品，未经允许禁止商用，违者必究！
 
 本工具集成以下开源资源：
-· CFPA 社区汉化资源包（CC BY-NC-SA 4.0）
+· CFPA 社区汉化资源包 (CC BY-NC-SA 4.0)
   感谢 CFPAOrg 团队及所有贡献者
 · 汉化小工具 (tt.nptr.cc)
+
+致谢：
+· I18nUpdateMod 自动汉化更新模组
 
 ═══════════════════════════════════════
 请关注 B站「南_岳」支持更多原创工具！
 ═══════════════════════════════════════
 ";
             MessageBox.Show(about, "关于 / 版权", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void ApplyTheme(bool dark)
+        {
+            Color bg = dark ? Color.FromArgb(30, 30, 30) : Color.White;
+            Color fg = dark ? Color.White : Color.Black;
+            Color tbBg = dark ? Color.FromArgb(50, 50, 50) : Color.White;
+
+            this.BackColor = bg;
+            if (tabMain == null) return;
+            foreach (TabPage page in tabMain.TabPages)
+            {
+                page.BackColor = bg;
+                foreach (Control ctrl in page.Controls)
+                {
+                    try
+                    {
+                        switch (ctrl)
+                        {
+                            case Label lbl:
+                                lbl.ForeColor = fg; break;
+                            case CheckBox cb:
+                                cb.ForeColor = fg; break;
+                            case TextBox tb:
+                                tb.BackColor = tbBg; tb.ForeColor = fg; break;
+                            case ComboBox cbx:
+                                cbx.BackColor = tbBg; cbx.ForeColor = fg; break;
+                            case NumericUpDown nud:
+                                nud.BackColor = tbBg; nud.ForeColor = fg; break;
+                            case RoundedButton rb:
+                                rb.BackColor = Color.FromArgb(0, 120, 212); rb.ForeColor = Color.White; break;
+                            default:
+                                ctrl.ForeColor = fg; break;
+                        }
+                    }
+                    catch { }
+                }
+            }
         }
 
         private void LoadSettings()
@@ -519,6 +977,11 @@ namespace MCTranslator
                 if (!string.IsNullOrWhiteSpace(settings.BaiduSecret)) txtBaiduSecret!.Text = settings.BaiduSecret;
                 if (!string.IsNullOrWhiteSpace(settings.DeepSeekKey)) txtDeepSeekKey!.Text = settings.DeepSeekKey;
                 if (!string.IsNullOrWhiteSpace(settings.DeepSeekModel)) txtDeepSeekModel!.Text = settings.DeepSeekModel;
+                if (!string.IsNullOrWhiteSpace(settings.TranslationStyle) && cmbStyle != null)
+                {
+                    if (cmbStyle.Items.Contains(settings.TranslationStyle))
+                        cmbStyle.SelectedItem = settings.TranslationStyle;
+                }
             };
             // 请在 lambda 内部已有的赋值语句后面追加
             if (!string.IsNullOrWhiteSpace(settings.GitHubToken))
@@ -538,7 +1001,8 @@ namespace MCTranslator
                 BaiduSecret = txtBaiduSecret?.Text?.Trim(),
                 DeepSeekKey = txtDeepSeekKey?.Text?.Trim(),
                 DeepSeekModel = txtDeepSeekModel?.Text?.Trim(),
-                  GitHubToken = (pnlConfig.Controls.Find("txtGitHubToken", true).FirstOrDefault() as TextBox)?.Text?.Trim()
+                  GitHubToken = (pnlConfig.Controls.Find("txtGitHubToken", true).FirstOrDefault() as TextBox)?.Text?.Trim(),
+                  TranslationStyle = cmbStyle?.SelectedItem?.ToString()
             };
             SettingsManager.Save(settings);
         }
@@ -557,9 +1021,10 @@ namespace MCTranslator
             try
             {
                 string? engine = cmbEngine.SelectedItem?.ToString();
+                string style = cmbStyle?.SelectedItem?.ToString() ?? "标准";
                 ITranslationService service = engine == "百度翻译"
                     ? new BaiduService(txtBaiduAppId!.Text.Trim(), txtBaiduSecret!.Text.Trim())
-                    : new DeepSeekService(txtDeepSeekKey!.Text.Trim(), txtDeepSeekModel?.Text.Trim() ?? "deepseek-chat");
+                    : new DeepSeekService(txtDeepSeekKey!.Text.Trim(), txtDeepSeekModel?.Text.Trim() ?? "deepseek-chat", style);
                 var translated = await service.TranslateAsync(new List<string> { englishName });
                 if (translated.Count > 0 && !string.IsNullOrWhiteSpace(translated[0])) return translated[0];
             }
@@ -711,12 +1176,17 @@ namespace MCTranslator
         }
 
         // ============= 保存整合包资源包 =============
-        private void SaveModpackPack()
+        private async Task SaveModpackPackAsync()
         {
             if (CurrentSession.TargetDict.Count == 0) { MessageBox.Show("没有翻译内容"); return; }
+            
+            // 获取整合包文件夹名称并翻译
+            string folderName = Path.GetFileName(CurrentSession.FilePathOrFolder) ?? "整合包";
+            string chineseName = await TranslateFileNameAsync(folderName);
+            
             using SaveFileDialog sfd = new()
             {
-                FileName = "整合包汉化资源包.zip",
+                FileName = $"{chineseName}_汉化资源包.zip",
                 Filter = "ZIP 文件|*.zip"
             };
             if (sfd.ShowDialog() != DialogResult.OK) return;
@@ -794,28 +1264,38 @@ namespace MCTranslator
                 {
                     if (string.IsNullOrWhiteSpace(txtDeepSeekKey?.Text))
                     { MessageBox.Show("请填写 DeepSeek Key"); return; }
-                    service = new DeepSeekService(txtDeepSeekKey.Text.Trim(), txtDeepSeekModel?.Text.Trim() ?? "deepseek-chat");
+                    string style = cmbStyle?.SelectedItem?.ToString() ?? "标准";
+                    service = new DeepSeekService(txtDeepSeekKey.Text.Trim(), txtDeepSeekModel?.Text.Trim() ?? "deepseek-chat", style: style);
                 }
             }
-            catch (Exception ex) { MessageBox.Show($"创建翻译服务失败：{ex.Message}"); return; }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"创建翻译服务失败：{ex.Message}");
+                MCTranslator.ErrorLogger.Log(ex.ToString());
+                return;
+            }
 
             CurrentSession.ErrorCount = 0;
             int batchSize = engine == "百度翻译" ? 30 : 20; // use engine variable declared above
             var pendingPairs = untranslatedKeys.Select(k => new KeyValuePair<string, string>(k, CurrentSession.SourceDict[k])).ToList();
             int totalBatches = (int)Math.Ceiling((double)pendingPairs.Count / batchSize);
 
-            try
+            // 创建批次列表
+            var batches = new List<List<KeyValuePair<string, string>>>();
+            for (int i = 0; i < pendingPairs.Count; i += batchSize)
             {
-                for (int i = 0; i < pendingPairs.Count; i += batchSize)
+                batches.Add(pendingPairs.Skip(i).Take(batchSize).ToList());
+            }
+
+            var semaphore = new SemaphoreSlim(_maxConcurrency);
+            var completedBatches = 0;
+            var errorCount = 0;
+            var tasks = batches.Select(async batchPairs =>
+            {
+                await semaphore.WaitAsync(ct);
+                try
                 {
-                    ct.ThrowIfCancellationRequested();  // 每次循环检查
-
-                    var batchPairs = pendingPairs.Skip(i).Take(batchSize).ToList();
                     var batchTexts = batchPairs.Select(p => p.Value).ToList();
-
-                    CurrentSource.Text = $"正在翻译 {i + 1}/{pendingPairs.Count} 条目（第 {i / batchSize + 1}/{totalBatches} 批），已出错 {CurrentSession.ErrorCount} 条...";
-                    Application.DoEvents();
-
                     List<string> batchResult = null!;
                     bool success = false;
                     int retries = 2;
@@ -833,8 +1313,10 @@ namespace MCTranslator
                             if (retries < 0)
                             {
                                 batchResult = new List<string>(batchTexts);
-                                CurrentSession.ErrorCount += batchTexts.Count;
+                                Interlocked.Add(ref errorCount, batchTexts.Count);
+                                // 记录最近错误到窗体标题
                                 this.Text = $"MC 汉化器（最近出错：{ex.Message.Substring(0, Math.Min(ex.Message.Length, 40))}...）";
+                                MCTranslator.ErrorLogger.Log(ex.ToString());
                                 await Task.Delay(500, ct);
                                 this.Text = "Minecraft 资源包/光影/整合包汉化器（百度 & DeepSeek）";
                             }
@@ -849,17 +1331,35 @@ namespace MCTranslator
                     {
                         CurrentSession.TargetDict[batchPairs[j].Key] = batchResult[j];
                     }
+
+                    Interlocked.Increment(ref completedBatches);
+                    CurrentSource.Text = $"正在翻译 {completedBatches}/{batches.Count} 批次，已出错 {errorCount} 条...";
+                    Application.DoEvents();
                 }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }).ToArray();
+
+            try
+            {
+                await Task.WhenAll(tasks);
 
                 var sb = new StringBuilder();
                 foreach (var kv in CurrentSession.TargetDict.OrderBy(x => x.Key))
                     sb.AppendLine($"{kv.Key} = {Truncate(kv.Value, 70)}");
                 CurrentTarget.Text = sb.ToString();
-                CurrentSource.Text = CurrentSession.ErrorCount > 0 ? $"翻译完成，但有 {CurrentSession.ErrorCount} 条因错误使用了原文。" : "翻译完成！可保存汉化包。";
+                CurrentSource.Text = errorCount > 0 ? $"翻译完成，但有 {errorCount} 条因错误使用了原文。" : "翻译完成！可保存汉化包。";
             }
             catch (OperationCanceledException)
             {
                 CurrentSource.Text = "翻译已暂停，可再次点击「开始翻译」继续。";
+            }
+            catch (Exception ex)
+            {
+                MCTranslator.ErrorLogger.Log(ex.ToString());
+                MessageBox.Show($"翻译过程中发生错误: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {

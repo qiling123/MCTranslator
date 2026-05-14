@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
@@ -76,6 +76,15 @@ namespace MCTranslator
                 "https://platform.deepseek.com", ref y);
             AddText(panel, "注册并登录 → API Keys → 创建密钥。", ref y);
             AddText(panel, "需充值任意金额（最低 1 元），翻译成本极低。", ref y);
+            y += 10;
+
+            // ── 致谢 ──
+            AddSection(panel, "【致谢】", ref y);
+            AddText(panel, "本工具可与以下社区优秀模组配合，实现更完整的汉化体验：", ref y);
+            AddText(panel, "• I18nUpdateMod (自动汉化更新) - 自动下载并加载最新CFPA汉化资源包", ref y);
+            AddLink(panel, "https://www.curseforge.com/minecraft/mc-mods/i18nupdatemod",
+                "https://www.curseforge.com/minecraft/mc-mods/i18nupdatemod", ref y);
+            AddText(panel, "感谢这些工具的开发者们为 Minecraft 社区做出的贡献！", ref y);
             y += 10;
 
             // ── 版权声明 ──

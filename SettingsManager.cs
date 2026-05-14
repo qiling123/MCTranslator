@@ -13,6 +13,7 @@ namespace MCTranslator
         public string? BaiduSecret { get; set; }
         public string? DeepSeekKey { get; set; }
         public string? DeepSeekModel { get; set; }
+        public string? TranslationStyle { get; set; }
         public int LastEngineIndex { get; set; } // 0=百度, 1=DeepSeek
     }
 
